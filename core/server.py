@@ -579,6 +579,67 @@ async def health_check(request: Request):
     )
 
 
+@server.custom_route("/auth/joint", methods=["GET"])
+async def initiate_joint_auth(request: Request) -> HTMLResponse:
+    """Start an OAuth2 flow to authorise the joint Gmail account (lizzieandpaul2019@gmail.com).
+
+    Visit this URL in a browser while logged into (or able to switch to)
+    lizzieandpaul2019@gmail.com.  After Google redirects back to the callback,
+    the credentials will be stored and subsequent tool calls with account='joint'
+    will use them.
+    """
+    import os as _os
+    from auth.google_auth import create_oauth_flow
+    from auth.scopes import get_current_scopes
+    from auth.oauth21_session_store import get_oauth21_session_store as _get_store
+
+    JOINT_EMAIL = "lizzieandpaul2019@gmail.com"
+
+    try:
+        oauth_state = _os.urandom(16).hex()
+        redirect_uri = get_oauth_redirect_uri_for_current_mode()
+        current_scopes = get_current_scopes()
+
+        flow = create_oauth_flow(
+            scopes=current_scopes,
+            redirect_uri=redirect_uri,
+            state=oauth_state,
+        )
+
+        # Build the authorization URL (PKCE code_verifier is generated inside flow)
+        auth_url, _ = flow.authorization_url(
+            access_type="offline",
+            prompt="consent",
+            login_hint=JOINT_EMAIL,
+        )
+
+        # Persist PKCE state so the callback can reconstruct the flow
+        store = _get_store()
+        store.store_oauth_state(
+            oauth_state,
+            session_id=None,  # browser-initiated; no MCP session
+            code_verifier=flow.code_verifier,
+        )
+
+        logger.info(f"[/auth/joint] Started OAuth flow for {JOINT_EMAIL}, state={oauth_state[:8]}...")
+
+        html = (
+            "<!DOCTYPE html><html><head>"
+            f'<meta http-equiv="refresh" content="0; url={auth_url}">'
+            "<title>Authorising joint account…</title></head><body>"
+            f"<p>Redirecting to Google to authorise <strong>{JOINT_EMAIL}</strong>…</p>"
+            f'<p>If not redirected automatically, <a href="{auth_url}">click here</a>.</p>'
+            "</body></html>"
+        )
+        return HTMLResponse(html)
+    except Exception as e:
+        logger.error(f"[/auth/joint] Failed to start auth flow: {e}", exc_info=True)
+        return HTMLResponse(
+            f"<p>Error starting joint account auth flow: {e}</p>",
+            status_code=500,
+        )
+
+
 @server.custom_route("/attachments/{file_id}", methods=["GET"])
 async def serve_attachment(request: Request):
     """Serve a stored attachment file."""

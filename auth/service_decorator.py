@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import inspect
 import json
@@ -264,6 +265,56 @@ def _validate_dwd_domain(email: str, config) -> None:
             f"Domain '{domain}' is not in DWD_ALLOWED_DOMAINS. "
             f"Allowed: {', '.join(config.dwd_allowed_domains)}"
         )
+
+
+JOINT_GMAIL_ACCOUNT = "lizzieandpaul2019@gmail.com"
+
+
+async def _authenticate_joint_service(
+    service_name: str,
+    service_version: str,
+    tool_name: str,
+    resolved_scopes: List[str],
+) -> Tuple[Any, str]:
+    """Build a Google service using the joint account's own stored OAuth credentials.
+
+    Loads credentials for JOINT_GMAIL_ACCOUNT directly from the file-based
+    credential store, bypassing the current MCP session auth entirely.
+    Refreshes the token if expired. Raises GoogleAuthenticationError if no
+    credentials are stored (directing the user to /auth/joint).
+    """
+    from auth.credential_store import get_credential_store
+    from google.auth.transport.requests import Request
+
+    credential_store = get_credential_store()
+    credentials = credential_store.get_credential(JOINT_GMAIL_ACCOUNT)
+
+    if not credentials:
+        raise GoogleAuthenticationError(
+            f"No credentials stored for {JOINT_GMAIL_ACCOUNT}. "
+            "Please authenticate the joint account by visiting /auth/joint on the server."
+        )
+
+    if not credentials.valid:
+        if credentials.refresh_token:
+            try:
+                await asyncio.to_thread(credentials.refresh, Request())
+                credential_store.store_credential(JOINT_GMAIL_ACCOUNT, credentials)
+                logger.info(f"[{tool_name}] Refreshed joint account credentials for {JOINT_GMAIL_ACCOUNT}")
+            except Exception as e:
+                raise GoogleAuthenticationError(
+                    f"Failed to refresh credentials for {JOINT_GMAIL_ACCOUNT}: {e}. "
+                    "Please re-authenticate by visiting /auth/joint."
+                )
+        else:
+            raise GoogleAuthenticationError(
+                f"Credentials for {JOINT_GMAIL_ACCOUNT} are expired and have no refresh token. "
+                "Please re-authenticate by visiting /auth/joint."
+            )
+
+    logger.info(f"[{tool_name}] Using joint account credentials for {JOINT_GMAIL_ACCOUNT} -> {service_name}/{service_version}")
+    service = build(service_name, service_version, credentials=credentials)
+    return service, JOINT_GMAIL_ACCOUNT
 
 
 async def _authenticate_service(
@@ -781,17 +832,25 @@ def require_google_service(
                         tool_name,
                     )
 
-                # Authenticate service
-                service, actual_user_email = await _authenticate_service(
-                    use_oauth21,
-                    service_name,
-                    service_version,
-                    tool_name,
-                    user_google_email,
-                    resolved_scopes,
-                    mcp_session_id,
-                    authenticated_user,
-                )
+                # Check for joint account override — bypass session auth and load
+                # stored credentials for the joint account directly.
+                account = kwargs.get("account", "primary")
+                if account == "joint":
+                    service, actual_user_email = await _authenticate_joint_service(
+                        service_name, service_version, tool_name, resolved_scopes
+                    )
+                else:
+                    # Authenticate service
+                    service, actual_user_email = await _authenticate_service(
+                        use_oauth21,
+                        service_name,
+                        service_version,
+                        tool_name,
+                        user_google_email,
+                        resolved_scopes,
+                        mcp_session_id,
+                        authenticated_user,
+                    )
             except GoogleAuthenticationError as e:
                 logger.error(
                     f"[{tool_name}] Auth failed for {user_google_email} | "
