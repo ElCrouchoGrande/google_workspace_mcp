@@ -650,12 +650,12 @@ async def initiate_joint_auth(request: Request) -> HTMLResponse:
 async def joint_auth_callback(request: Request) -> HTMLResponse:
     """Handle Google's OAuth callback for the joint account auth flow."""
     from auth.google_auth import handle_auth_callback
+    from auth.credential_store import get_credential_store
     from auth.oauth_config import get_oauth_config as _get_oauth_config
     from auth.scopes import get_current_scopes
 
-    state = request.query_params.get("state")
-    code = request.query_params.get("code")
     error = request.query_params.get("error")
+    code = request.query_params.get("code")
 
     if error:
         msg = f"Joint account authentication failed: {error}"
@@ -675,6 +675,18 @@ async def joint_auth_callback(request: Request) -> HTMLResponse:
             redirect_uri=redirect_uri,
             session_id=None,
         )
+        # Always persist joint credentials to the file store regardless of
+        # stateless mode — this is how joint-account tool calls find them.
+        try:
+            credential_store = get_credential_store()
+            await asyncio.to_thread(
+                credential_store.store_credential, verified_email, credentials
+            )
+            logger.info(f"[/auth/joint/callback] Persisted credentials for {verified_email}")
+        except Exception as store_err:
+            logger.warning(
+                f"[/auth/joint/callback] Could not persist credentials for {verified_email}: {store_err}"
+            )
         logger.info(f"[/auth/joint/callback] Successfully authenticated {verified_email}")
         return create_success_response(verified_email)
     except Exception as e:
