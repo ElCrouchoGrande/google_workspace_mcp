@@ -462,14 +462,20 @@ def configure_server_for_http():
                         "Falling back to default storage.",
                         exc,
                     )
-            elif storage_backend == "memory":
+            else:
+                # Default to MemoryStore — safe for ephemeral Railway containers
+                # and avoids FileTreeStore filesystem permission issues.
                 from key_value.aio.stores.memory import MemoryStore
 
                 client_storage = MemoryStore()
-                logger.info(
-                    "OAuth 2.1: Using MemoryStore for FastMCP OAuth proxy client_storage"
-                )
-            # else: client_storage remains None, FastMCP uses its default
+                if storage_backend == "memory":
+                    logger.info(
+                        "OAuth 2.1: Using MemoryStore for FastMCP OAuth proxy client_storage (explicit)"
+                    )
+                else:
+                    logger.info(
+                        "OAuth 2.1: Using MemoryStore for FastMCP OAuth proxy client_storage (default)"
+                    )
 
             # Ensure JWT signing key is always derived for all storage backends
             if "jwt_signing_key" not in locals():
@@ -520,6 +526,10 @@ def configure_server_for_http():
                     client_storage=client_storage,
                     jwt_signing_key=jwt_signing_key,
                     allowed_client_redirect_uris=allowed_client_redirect_uris,
+                    # Skip FastMCP's own consent screen — Google shows its own.
+                    # This avoids the __Host-MCP_CONSENT_BINDING cookie check that
+                    # can fail when Railway's proxy terminates TLS.
+                    require_authorization_consent="external",
                 )
                 if provider.client_registration_options is not None:
                     # Keep protocol-level auth limited to base identity scopes, but
