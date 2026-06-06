@@ -579,6 +579,9 @@ async def health_check(request: Request):
     )
 
 
+_JOINT_CALLBACK_PATH = "/auth/joint/callback"
+
+
 @server.custom_route("/auth/joint", methods=["GET"])
 async def initiate_joint_auth(request: Request) -> HTMLResponse:
     """Start an OAuth2 flow to authorise the joint Gmail account (lizzieandpaul2019@gmail.com).
@@ -598,7 +601,9 @@ async def initiate_joint_auth(request: Request) -> HTMLResponse:
 
     try:
         oauth_state = _os.urandom(16).hex()
-        redirect_uri = _get_oauth_config().get_oauth_base_url() + "/oauth2callback"
+        # Use a dedicated callback path so FastMCP's GoogleProvider (which owns
+        # /oauth2callback in OAuth 2.1 mode) never intercepts joint-auth callbacks.
+        redirect_uri = _get_oauth_config().get_oauth_base_url() + _JOINT_CALLBACK_PATH
         current_scopes = get_current_scopes()
 
         flow = create_oauth_flow(
@@ -639,6 +644,42 @@ async def initiate_joint_auth(request: Request) -> HTMLResponse:
             f"<p>Error starting joint account auth flow: {e}</p>",
             status_code=500,
         )
+
+
+@server.custom_route("/auth/joint/callback", methods=["GET"])
+async def joint_auth_callback(request: Request) -> HTMLResponse:
+    """Handle Google's OAuth callback for the joint account auth flow."""
+    from auth.google_auth import handle_auth_callback
+    from auth.oauth_config import get_oauth_config as _get_oauth_config
+    from auth.scopes import get_current_scopes
+
+    state = request.query_params.get("state")
+    code = request.query_params.get("code")
+    error = request.query_params.get("error")
+
+    if error:
+        msg = f"Joint account authentication failed: {error}"
+        logger.error(msg)
+        return create_error_response(msg)
+
+    if not code:
+        msg = "Joint account authentication failed: no authorization code received."
+        logger.error(msg)
+        return create_error_response(msg)
+
+    try:
+        redirect_uri = _get_oauth_config().get_oauth_base_url() + _JOINT_CALLBACK_PATH
+        verified_email, credentials = await handle_auth_callback(
+            scopes=get_current_scopes(),
+            authorization_response=str(request.url),
+            redirect_uri=redirect_uri,
+            session_id=None,
+        )
+        logger.info(f"[/auth/joint/callback] Successfully authenticated {verified_email}")
+        return create_success_response(verified_email)
+    except Exception as e:
+        logger.error(f"[/auth/joint/callback] Error: {e}", exc_info=True)
+        return create_server_error_response(str(e))
 
 
 @server.custom_route("/attachments/{file_id}", methods=["GET"])
