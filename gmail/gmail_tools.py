@@ -78,6 +78,19 @@ LOW_VALUE_TEXT_FOOTER_MARKERS = (
 LOW_VALUE_TEXT_HTML_DIFF_MIN = 80
 CONTENT_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+\-@]*$")
 
+JOINT_GMAIL_ACCOUNT = "lizzieandpaul2019@gmail.com"
+
+
+def _resolve_gmail_user_id(account: Optional[str]) -> str:
+    """Map account alias to Gmail API userId parameter.
+
+    'joint' resolves to the delegated lizzieandpaul2019 address; everything
+    else (including None / 'primary') resolves to 'me' (the authenticated user).
+    """
+    if account == "joint":
+        return JOINT_GMAIL_ACCOUNT
+    return "me"
+
 
 class _HTMLTextExtractor(HTMLParser):
     """Extract readable text from HTML using stdlib."""
@@ -319,9 +332,10 @@ def _build_message_get_request(
     service,
     message_id: str,
     message_format: Literal["metadata", "full", "raw"],
+    user_id: str = "me",
 ):
     """Build a Gmail messages.get request for the requested format."""
-    request_kwargs = {"userId": "me", "id": message_id, "format": message_format}
+    request_kwargs = {"userId": user_id, "id": message_id, "format": message_format}
     if message_format == "metadata":
         request_kwargs["metadataHeaders"] = GMAIL_METADATA_HEADERS
     return service.users().messages().get(**request_kwargs)
@@ -344,13 +358,14 @@ async def _fetch_message_with_retry(
     message_format: Literal["metadata", "full", "raw"],
     log_prefix: str,
     max_retries: int = 3,
+    user_id: str = "me",
 ):
     """Fetch a single Gmail message with SSL retry handling."""
     for attempt in range(max_retries):
         try:
             message = await asyncio.to_thread(
                 _build_message_get_request(
-                    service, message_id=message_id, message_format=message_format
+                    service, message_id=message_id, message_format=message_format, user_id=user_id
                 ).execute
             )
             return message_id, message, None
@@ -371,7 +386,7 @@ async def _fetch_message_with_retry(
 
 
 async def _fetch_raw_message_contents(
-    service, message_ids: List[str], log_prefix: str
+    service, message_ids: List[str], log_prefix: str, user_id: str = "me"
 ) -> Dict[str, str]:
     """Fetch decoded raw MIME content for a set of Gmail message IDs."""
     raw_contents: Dict[str, str] = {}
@@ -381,6 +396,7 @@ async def _fetch_raw_message_contents(
             message_id=message_id,
             message_format="raw",
             log_prefix=log_prefix,
+            user_id=user_id,
         )
         raw_contents[message_id] = (
             _decode_raw_mime_content(raw_message.get("raw", ""))
@@ -494,7 +510,7 @@ def _build_quoted_reply_body(
     return f"{reply_body}{sig_block}\n\n{attribution}\n{quoted_lines}"
 
 
-async def _get_send_as_signature_html(service, from_email: Optional[str] = None) -> str:
+async def _get_send_as_signature_html(service, from_email: Optional[str] = None, user_id: str = "me") -> str:
     """
     Fetch signature HTML from Gmail send-as settings.
 
@@ -503,7 +519,7 @@ async def _get_send_as_signature_html(service, from_email: Optional[str] = None)
     """
     try:
         response = await asyncio.to_thread(
-            service.users().settings().sendAs().list(userId="me").execute
+            service.users().settings().sendAs().list(userId=user_id).execute
         )
     except HttpError as e:
         if _is_benign_signature_http_error(e):
@@ -535,10 +551,10 @@ async def _get_send_as_signature_html(service, from_email: Optional[str] = None)
 
 
 async def _get_send_as_signature_html_for_tool(
-    service, from_email: Optional[str] = None
+    service, from_email: Optional[str] = None, user_id: str = "me"
 ) -> str:
     """Fetch signature HTML and convert non-benign failures to tool errors."""
-    return await _get_send_as_signature_html(service, from_email=from_email)
+    return await _get_send_as_signature_html(service, from_email=from_email, user_id=user_id)
 
 
 def _format_attachment_result(attached_count: int, requested_count: int) -> str:
@@ -722,13 +738,14 @@ async def _fetch_thread_reply_context(
     thread_id: str,
     in_reply_to: Optional[str] = None,
     include_bodies: bool = False,
+    user_id: str = "me",
 ) -> Optional[Dict[str, Any]]:
     """Fetch reply metadata for a thread, optionally including message bodies."""
     header_names = ["Message-ID", "Subject", "From", "Reply-To", "To", "Cc", "Date"]
 
     try:
         request_kwargs = {
-            "userId": "me",
+            "userId": user_id,
             "id": thread_id,
             "format": "full" if include_bodies else "metadata",
         }
@@ -1339,6 +1356,16 @@ async def search_gmail_messages(
     user_google_email: str,
     page_size: int = 10,
     page_token: Optional[str] = None,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to search. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Searches messages in a user's Gmail account based on a query.
@@ -1350,17 +1377,19 @@ async def search_gmail_messages(
         user_google_email (str): The user's Google email address. Required.
         page_size (int): The maximum number of messages to return. Defaults to 10.
         page_token (Optional[str]): Token for retrieving the next page of results. Use the next_page_token from a previous response.
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: LLM-friendly structured results with Message IDs, Thread IDs, and clickable Gmail web interface URLs for each found message.
         Includes pagination token if more results are available.
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[search_gmail_messages] Email: '{user_google_email}', Query: '{query}', Page size: {page_size}"
+        f"[search_gmail_messages] Email: '{user_google_email}', Account: '{account}', Query: '{query}', Page size: {page_size}"
     )
 
     # Build the API request parameters
-    request_params = {"userId": "me", "q": query, "maxResults": page_size}
+    request_params = {"userId": gmail_user_id, "q": query, "maxResults": page_size}
 
     # Add page token if provided
     if page_token:
@@ -1422,6 +1451,16 @@ async def get_gmail_message_content(
             ),
         ),
     ] = "text",
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to read from. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Retrieves the full content (subject, sender, recipients, body) of a specific Gmail message.
@@ -1433,12 +1472,14 @@ async def get_gmail_message_content(
             "text" (default) returns plaintext (HTML converted to text as fallback).
             "html" returns the raw HTML body as-is without conversion.
             "raw" fetches the full raw MIME message and returns the base64url-decoded content.
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: The message details including subject, sender, date, Message-ID, recipients (To, Cc), and body content.
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[get_gmail_message_content] Invoked. Message ID: '{message_id}', Email: '{user_google_email}'"
+        f"[get_gmail_message_content] Invoked. Message ID: '{message_id}', Email: '{user_google_email}', Account: '{account}'"
     )
 
     logger.info(f"[get_gmail_message_content] Using service for: {user_google_email}")
@@ -1448,7 +1489,7 @@ async def get_gmail_message_content(
         service.users()
         .messages()
         .get(
-            userId="me",
+            userId=gmail_user_id,
             id=message_id,
             format="metadata",
             metadataHeaders=GMAIL_METADATA_HEADERS,
@@ -1465,7 +1506,7 @@ async def get_gmail_message_content(
         message_raw = await asyncio.to_thread(
             service.users()
             .messages()
-            .get(userId="me", id=message_id, format="raw")
+            .get(userId=gmail_user_id, id=message_id, format="raw")
             .execute
         )
         decoded_raw = _decode_raw_mime_content(message_raw.get("raw", ""))
@@ -1479,7 +1520,7 @@ async def get_gmail_message_content(
         service.users()
         .messages()
         .get(
-            userId="me",
+            userId=gmail_user_id,
             id=message_id,
             format="full",  # Request full payload for body
         )
@@ -1544,6 +1585,16 @@ async def get_gmail_messages_content_batch(
             ),
         ),
     ] = "text",
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to read from. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Retrieves the content of multiple Gmail messages in a single batch request.
@@ -1557,12 +1608,14 @@ async def get_gmail_messages_content_batch(
             "text" (default) returns plaintext (HTML converted to text as fallback).
             "html" returns the raw HTML body as-is without conversion.
             "raw" fetches the full raw MIME message and returns the base64url-decoded content.
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: A formatted list of message contents including subject, sender, date, Message-ID, recipients (To, Cc), and body (if full format).
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[get_gmail_messages_content_batch] Invoked. Message count: {len(message_ids)}, Email: '{user_google_email}'"
+        f"[get_gmail_messages_content_batch] Invoked. Message count: {len(message_ids)}, Email: '{user_google_email}', Account: '{account}'"
     )
 
     if not message_ids:
@@ -1587,11 +1640,11 @@ async def get_gmail_messages_content_batch(
             for mid in chunk_ids:
                 if format == "metadata" or body_format == "raw":
                     req = _build_message_get_request(
-                        service, message_id=mid, message_format="metadata"
+                        service, message_id=mid, message_format="metadata", user_id=gmail_user_id
                     )
                 else:
                     req = _build_message_get_request(
-                        service, message_id=mid, message_format="full"
+                        service, message_id=mid, message_format="full", user_id=gmail_user_id
                     )
                 batch.add(req, request_id=mid)
 
@@ -1616,6 +1669,7 @@ async def get_gmail_messages_content_batch(
                     message_id=mid,
                     message_format=message_format,
                     log_prefix="get_gmail_messages_content_batch",
+                    user_id=gmail_user_id,
                 )
                 results[mid_result] = {"data": msg_data, "error": error}
                 # Brief delay between requests to allow connection cleanup
@@ -1630,6 +1684,7 @@ async def get_gmail_messages_content_batch(
                 service,
                 raw_message_ids,
                 log_prefix="get_gmail_messages_content_batch",
+                user_id=gmail_user_id,
             )
 
         # Process results for this chunk
@@ -1722,6 +1777,16 @@ async def get_gmail_attachment_content(
     attachment_id: str,
     user_google_email: str,
     return_base64: bool = False,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to read from. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Downloads an email attachment and saves it to local disk.
@@ -1743,14 +1808,16 @@ async def get_gmail_attachment_content(
             directly to tools like ``draft_gmail_message`` that expect
             standard (not URL-safe) base64. Default False preserves the
             existing behavior and response size.
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: Attachment metadata with either a local file path or download URL,
             optionally followed by a base64 content block when
             ``return_base64=True``.
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[get_gmail_attachment_content] Invoked. Message ID: '{message_id}', Email: '{user_google_email}'"
+        f"[get_gmail_attachment_content] Invoked. Message ID: '{message_id}', Email: '{user_google_email}', Account: '{account}'"
     )
 
     # Download attachment content first, then optionally re-fetch message metadata
@@ -1760,7 +1827,7 @@ async def get_gmail_attachment_content(
             service.users()
             .messages()
             .attachments()
-            .get(userId="me", messageId=message_id, id=attachment_id)
+            .get(userId=gmail_user_id, messageId=message_id, id=attachment_id)
             .execute
         )
     except Exception as e:
@@ -1814,7 +1881,7 @@ async def get_gmail_attachment_content(
                 service.users()
                 .messages()
                 .get(
-                    userId="me",
+                    userId=gmail_user_id,
                     id=message_id,
                     format="full",
                     fields="payload(parts(filename,mimeType,body(attachmentId,size)),body(attachmentId,size),filename,mimeType)",
@@ -1982,6 +2049,16 @@ async def send_gmail_message(
             description="Whether to append the Gmail signature from Settings > Signature when available. Defaults to true.",
         ),
     ] = True,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to send from. "
+                "'primary' (default) sends via paul.crouch1@gmail.com; "
+                "'joint' sends via the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Sends an email using the user's Gmail account. Supports both new emails and replies with optional attachments.
@@ -2084,20 +2161,21 @@ async def send_gmail_message(
             references="<original@gmail.com> <message123@gmail.com>"
         )
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[send_gmail_message] Invoked. Email: '{user_google_email}', Subject: '{subject}', Attachments: {len(attachments) if attachments else 0}"
+        f"[send_gmail_message] Invoked. Email: '{user_google_email}', Account: '{account}', Subject: '{subject}', Attachments: {len(attachments) if attachments else 0}"
     )
 
     # Prepare the email message
     # Use from_email (Send As alias) if provided, otherwise default to authenticated user
-    sender_email = from_email or user_google_email
+    sender_email = from_email or (JOINT_GMAIL_ACCOUNT if account == "joint" else user_google_email)
 
     # Optionally append the Gmail signature from send-as settings, mirroring
     # draft_gmail_message so sent mail respects the user's Settings > Signature.
     send_body_content = body
     if include_signature:
         signature_html = await _get_send_as_signature_html_for_tool(
-            service, from_email=sender_email
+            service, from_email=sender_email, user_id=gmail_user_id
         )
         send_body_content = _append_signature_to_body(
             send_body_content, body_format, signature_html
@@ -2139,7 +2217,7 @@ async def send_gmail_message(
 
     # Send the message
     sent_message = await asyncio.to_thread(
-        service.users().messages().send(userId="me", body=send_body).execute,
+        service.users().messages().send(userId=gmail_user_id, body=send_body).execute,
         num_retries=GOOGLE_API_WRITE_RETRIES,
     )
     message_id = sent_message.get("id")
@@ -2234,6 +2312,16 @@ async def draft_gmail_message(
             description="Whether to include the original message as a quoted reply. Requires thread_id. Defaults to false.",
         ),
     ] = False,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to draft in. "
+                "'primary' (default) drafts in paul.crouch1@gmail.com; "
+                "'joint' drafts in the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Creates a draft email in the user's Gmail account. Supports both new drafts and reply drafts with optional attachments.
@@ -2327,18 +2415,19 @@ async def draft_gmail_message(
             references="<original@gmail.com> <message123@gmail.com>"
         )
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[draft_gmail_message] Invoked. Email: '{user_google_email}', Subject: '{subject}'"
+        f"[draft_gmail_message] Invoked. Email: '{user_google_email}', Account: '{account}', Subject: '{subject}'"
     )
 
     # Prepare the email message
     # Use from_email (Send As alias) if provided, otherwise default to authenticated user
-    sender_email = from_email or user_google_email
+    sender_email = from_email or (JOINT_GMAIL_ACCOUNT if account == "joint" else user_google_email)
     draft_body = body
     signature_html = ""
     if include_signature:
         signature_html = await _get_send_as_signature_html_for_tool(
-            service, from_email=sender_email
+            service, from_email=sender_email, user_id=gmail_user_id
         )
 
     reply_context = None
@@ -2348,6 +2437,7 @@ async def draft_gmail_message(
             thread_id,
             in_reply_to=in_reply_to,
             include_bodies=quote_original,
+            user_id=gmail_user_id,
         )
 
     if thread_id and (not in_reply_to or not references):
@@ -2416,7 +2506,7 @@ async def draft_gmail_message(
 
     # Create the draft
     created_draft = await asyncio.to_thread(
-        service.users().drafts().create(userId="me", body=draft_body).execute,
+        service.users().drafts().create(userId=gmail_user_id, body=draft_body).execute,
         num_retries=GOOGLE_API_WRITE_RETRIES,
     )
     draft_id = created_draft.get("id")
@@ -2582,6 +2672,16 @@ async def get_gmail_thread_content(
             ),
         ),
     ] = False,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to read from. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> "str | Dict[str, Any]":
     """
     Retrieves the complete content of a Gmail conversation thread, including all messages.
@@ -2610,14 +2710,15 @@ async def get_gmail_thread_content(
             "content" (str) and "analysis" (dict). See
             `_analyze_thread_ownership_impl` for the analysis schema.
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
         f"[get_gmail_thread_content] Invoked. Thread ID: '{thread_id}', "
-        f"Email: '{user_google_email}', include_analysis={include_analysis}"
+        f"Email: '{user_google_email}', Account: '{account}', include_analysis={include_analysis}"
     )
 
     # Fetch the complete thread with all messages
     thread_response = await asyncio.to_thread(
-        service.users().threads().get(userId="me", id=thread_id, format="full").execute
+        service.users().threads().get(userId=gmail_user_id, id=thread_id, format="full").execute
     )
 
     raw_contents = None
@@ -2673,6 +2774,16 @@ async def get_gmail_threads_content_batch(
             ),
         ),
     ] = "text",
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to read from. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Retrieves the content of multiple Gmail threads in a single batch request.
@@ -2685,12 +2796,14 @@ async def get_gmail_threads_content_batch(
             "text" (default) returns plaintext (HTML converted to text as fallback).
             "html" returns the raw HTML body as-is without conversion.
             "raw" fetches each message's full raw MIME content and returns the base64url-decoded body.
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: A formatted list of thread contents with separators.
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[get_gmail_threads_content_batch] Invoked. Thread count: {len(thread_ids)}, Email: '{user_google_email}'"
+        f"[get_gmail_threads_content_batch] Invoked. Thread count: {len(thread_ids)}, Email: '{user_google_email}', Account: '{account}'"
     )
 
     if not thread_ids:
@@ -2712,7 +2825,7 @@ async def get_gmail_threads_content_batch(
             batch = service.new_batch_http_request(callback=_batch_callback)
 
             for tid in chunk_ids:
-                req = service.users().threads().get(userId="me", id=tid, format="full")
+                req = service.users().threads().get(userId=gmail_user_id, id=tid, format="full")
                 batch.add(req, request_id=tid)
 
             # Execute batch request
@@ -2731,7 +2844,7 @@ async def get_gmail_threads_content_batch(
                         thread = await asyncio.to_thread(
                             service.users()
                             .threads()
-                            .get(userId="me", id=tid, format="full")
+                            .get(userId=gmail_user_id, id=tid, format="full")
                             .execute
                         )
                         return tid, thread, None
@@ -2808,20 +2921,35 @@ async def get_gmail_threads_content_batch(
 )
 @handle_http_errors("list_gmail_labels", is_read_only=True, service_type="gmail")
 @require_google_service("gmail", "gmail_read")
-async def list_gmail_labels(service, user_google_email: str) -> str:
+async def list_gmail_labels(
+    service,
+    user_google_email: str,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to list labels for. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
+) -> str:
     """
     Lists all labels in the user's Gmail account.
 
     Args:
         user_google_email (str): The user's Google email address. Required.
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: A formatted list of all labels with their IDs, names, and types.
     """
-    logger.info(f"[list_gmail_labels] Invoked. Email: '{user_google_email}'")
+    gmail_user_id = _resolve_gmail_user_id(account)
+    logger.info(f"[list_gmail_labels] Invoked. Email: '{user_google_email}', Account: '{account}'")
 
     response = await asyncio.to_thread(
-        service.users().labels().list(userId="me").execute
+        service.users().labels().list(userId=gmail_user_id).execute
     )
     labels = response.get("labels", [])
 
@@ -2872,6 +3000,16 @@ async def manage_gmail_label(
     label_id: Optional[str] = None,
     label_list_visibility: Literal["labelShow", "labelHide"] = "labelShow",
     message_list_visibility: Literal["show", "hide"] = "show",
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to manage labels for. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Manages Gmail labels: create, update, or delete labels.
@@ -2887,8 +3025,9 @@ async def manage_gmail_label(
     Returns:
         str: Confirmation message of the label operation.
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[manage_gmail_label] Invoked. Email: '{user_google_email}', Action: '{action}'"
+        f"[manage_gmail_label] Invoked. Email: '{user_google_email}', Account: '{account}', Action: '{action}'"
     )
 
     if action == "create" and not name:
@@ -2904,13 +3043,13 @@ async def manage_gmail_label(
             "messageListVisibility": message_list_visibility,
         }
         created_label = await asyncio.to_thread(
-            service.users().labels().create(userId="me", body=label_object).execute
+            service.users().labels().create(userId=gmail_user_id, body=label_object).execute
         )
         return f"Label created successfully!\nName: {created_label['name']}\nID: {created_label['id']}"
 
     elif action == "update":
         current_label = await asyncio.to_thread(
-            service.users().labels().get(userId="me", id=label_id).execute
+            service.users().labels().get(userId=gmail_user_id, id=label_id).execute
         )
 
         label_object = {
@@ -2923,19 +3062,19 @@ async def manage_gmail_label(
         updated_label = await asyncio.to_thread(
             service.users()
             .labels()
-            .update(userId="me", id=label_id, body=label_object)
+            .update(userId=gmail_user_id, id=label_id, body=label_object)
             .execute
         )
         return f"Label updated successfully!\nName: {updated_label['name']}\nID: {updated_label['id']}"
 
     elif action == "delete":
         label = await asyncio.to_thread(
-            service.users().labels().get(userId="me", id=label_id).execute
+            service.users().labels().get(userId=gmail_user_id, id=label_id).execute
         )
         label_name = label["name"]
 
         await asyncio.to_thread(
-            service.users().labels().delete(userId="me", id=label_id).execute
+            service.users().labels().delete(userId=gmail_user_id, id=label_id).execute
         )
         return f"Label '{label_name}' (ID: {label_id}) deleted successfully!"
 
@@ -2951,20 +3090,35 @@ async def manage_gmail_label(
 )
 @handle_http_errors("list_gmail_filters", is_read_only=True, service_type="gmail")
 @require_google_service("gmail", "gmail_settings_basic")
-async def list_gmail_filters(service, user_google_email: str) -> str:
+async def list_gmail_filters(
+    service,
+    user_google_email: str,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to list filters for. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
+) -> str:
     """
     Lists all Gmail filters configured in the user's mailbox.
 
     Args:
         user_google_email (str): The user's Google email address. Required.
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: A formatted list of filters with their criteria and actions.
     """
-    logger.info(f"[list_gmail_filters] Invoked. Email: '{user_google_email}'")
+    gmail_user_id = _resolve_gmail_user_id(account)
+    logger.info(f"[list_gmail_filters] Invoked. Email: '{user_google_email}', Account: '{account}'")
 
     response = await asyncio.to_thread(
-        service.users().settings().filters().list(userId="me").execute
+        service.users().settings().filters().list(userId=gmail_user_id).execute
     )
 
     filters = response.get("filter") or response.get("filters") or []
@@ -3044,6 +3198,16 @@ async def manage_gmail_filter(
     criteria: Optional[JsonDict] = None,
     filter_action: Optional[JsonDict] = None,
     filter_id: Optional[str] = None,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to manage filters for. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Manages Gmail filters. Supports creating and deleting filters.
@@ -3054,10 +3218,12 @@ async def manage_gmail_filter(
         criteria (Optional[Dict[str, Any]]): Filter criteria object (required for create).
         filter_action (Optional[Dict[str, Any]]): Filter action object (required for create). Named 'filter_action' to avoid shadowing the 'action' parameter.
         filter_id (Optional[str]): ID of the filter to delete (required for delete).
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: Confirmation message with filter details.
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     action_lower = action.lower().strip()
     if action_lower == "create":
         if not criteria or not filter_action:
@@ -3070,7 +3236,7 @@ async def manage_gmail_filter(
             service.users()
             .settings()
             .filters()
-            .create(userId="me", body=filter_body)
+            .create(userId=gmail_user_id, body=filter_body)
             .execute
         )
         fid = created_filter.get("id", "(unknown)")
@@ -3080,13 +3246,13 @@ async def manage_gmail_filter(
             raise ValueError("filter_id is required for delete action")
         logger.info(f"[manage_gmail_filter] Deleting filter {filter_id}")
         filter_details = await asyncio.to_thread(
-            service.users().settings().filters().get(userId="me", id=filter_id).execute
+            service.users().settings().filters().get(userId=gmail_user_id, id=filter_id).execute
         )
         await asyncio.to_thread(
             service.users()
             .settings()
             .filters()
-            .delete(userId="me", id=filter_id)
+            .delete(userId=gmail_user_id, id=filter_id)
             .execute
         )
         criteria_info = filter_details.get("criteria", {})
@@ -3126,6 +3292,16 @@ async def modify_gmail_message_labels(
         Optional[StringList],
         Field(json_schema_extra={"type": "array", "items": {"type": "string"}}),
     ] = None,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to modify labels in. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Adds or removes labels from a Gmail message.
@@ -3137,12 +3313,14 @@ async def modify_gmail_message_labels(
         message_id (str): The ID of the message to modify.
         add_label_ids (Optional[List[str]]): List of label IDs to add to the message.
         remove_label_ids (Optional[List[str]]): List of label IDs to remove from the message.
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: Confirmation message of the label changes applied to the message.
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[modify_gmail_message_labels] Invoked. Email: '{user_google_email}', Message ID: '{message_id}'"
+        f"[modify_gmail_message_labels] Invoked. Email: '{user_google_email}', Account: '{account}', Message ID: '{message_id}'"
     )
 
     if not add_label_ids and not remove_label_ids:
@@ -3157,7 +3335,7 @@ async def modify_gmail_message_labels(
         body["removeLabelIds"] = remove_label_ids
 
     await asyncio.to_thread(
-        service.users().messages().modify(userId="me", id=message_id, body=body).execute
+        service.users().messages().modify(userId=gmail_user_id, id=message_id, body=body).execute
     )
 
     actions = []
@@ -3192,6 +3370,16 @@ async def batch_modify_gmail_message_labels(
         Optional[StringList],
         Field(json_schema_extra={"type": "array", "items": {"type": "string"}}),
     ] = None,
+    account: Annotated[
+        Optional[Literal["primary", "joint"]],
+        Field(
+            description=(
+                "Which Gmail account to modify labels in. "
+                "'primary' (default) uses paul.crouch1@gmail.com; "
+                "'joint' uses the delegated lizzieandpaul2019@gmail.com account."
+            ),
+        ),
+    ] = "primary",
 ) -> str:
     """
     Adds or removes labels from multiple Gmail messages in a single batch request.
@@ -3201,12 +3389,14 @@ async def batch_modify_gmail_message_labels(
         message_ids (List[str]): A list of message IDs to modify.
         add_label_ids (Optional[List[str]]): List of label IDs to add to the messages.
         remove_label_ids (Optional[List[str]]): List of label IDs to remove from the messages.
+        account (Optional[Literal["primary", "joint"]]): Which Gmail account to act on. Defaults to 'primary'.
 
     Returns:
         str: Confirmation message of the label changes applied to the messages.
     """
+    gmail_user_id = _resolve_gmail_user_id(account)
     logger.info(
-        f"[batch_modify_gmail_message_labels] Invoked. Email: '{user_google_email}', Message IDs: '{message_ids}'"
+        f"[batch_modify_gmail_message_labels] Invoked. Email: '{user_google_email}', Account: '{account}', Message IDs: '{message_ids}'"
     )
 
     if not add_label_ids and not remove_label_ids:
@@ -3221,7 +3411,7 @@ async def batch_modify_gmail_message_labels(
         body["removeLabelIds"] = remove_label_ids
 
     await asyncio.to_thread(
-        service.users().messages().batchModify(userId="me", body=body).execute
+        service.users().messages().batchModify(userId=gmail_user_id, body=body).execute
     )
 
     actions = []
