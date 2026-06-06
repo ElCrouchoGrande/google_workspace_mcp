@@ -531,6 +531,84 @@ def configure_server_for_http():
                     # can fail when Railway's proxy terminates TLS.
                     require_authorization_consent="external",
                 )
+
+                # Wrap load_access_token with step-by-step diagnostic logging so
+                # Railway logs reveal exactly which stage of token validation fails.
+                _original_load_access_token = provider.load_access_token
+
+                async def _debug_load_access_token(token: str):
+                    try:
+                        # Step 1: JWT signature verification
+                        try:
+                            payload = provider.jwt_issuer.verify_token(token)
+                            jti = payload.get("jti", "")
+                            logger.info(
+                                "OAuth debug [1/4] JWT verified ok, jti=%s...",
+                                jti[:12] if jti else "none",
+                            )
+                        except Exception as e:
+                            logger.error(
+                                "OAuth debug [1/4] JWT verify FAILED: %s", e
+                            )
+                            return None
+
+                        # Step 2: JTI mapping lookup
+                        jti_mapping = await provider._jti_mapping_store.get(key=jti)
+                        if not jti_mapping:
+                            logger.error(
+                                "OAuth debug [2/4] JTI mapping NOT FOUND for jti=%s... "
+                                "(token expired or store was reset)",
+                                jti[:12],
+                            )
+                            return None
+                        logger.info(
+                            "OAuth debug [2/4] JTI mapping found → upstream_token_id=%s...",
+                            jti_mapping.upstream_token_id[:12],
+                        )
+
+                        # Step 3: Upstream token lookup
+                        upstream = await provider._upstream_token_store.get(
+                            key=jti_mapping.upstream_token_id
+                        )
+                        if not upstream:
+                            logger.error(
+                                "OAuth debug [3/4] Upstream token NOT FOUND for id=%s...",
+                                jti_mapping.upstream_token_id[:12],
+                            )
+                            return None
+                        logger.info(
+                            "OAuth debug [3/4] Upstream token found, expires_at=%s, scope=%s",
+                            upstream.expires_at,
+                            (upstream.scope or "")[:80],
+                        )
+
+                        # Step 4: Full validation (Google tokeninfo)
+                        result = await _original_load_access_token(token)
+                        if result is None:
+                            logger.error(
+                                "OAuth debug [4/4] Google tokeninfo validation FAILED "
+                                "(check scope mismatch or expired token)"
+                            )
+                        else:
+                            logger.info(
+                                "OAuth debug [4/4] Token validation SUCCEEDED, client_id=%s",
+                                result.client_id,
+                            )
+                        return result
+                    except Exception as e:
+                        logger.error(
+                            "OAuth debug load_access_token EXCEPTION: %s", e, exc_info=True
+                        )
+                        return None
+
+                import types
+
+                provider.load_access_token = types.MethodType(
+                    lambda self, token: _debug_load_access_token(token), provider
+                )
+                # Rebind as a plain coroutine function (not a bound method) since
+                # _debug_load_access_token closes over `provider` already.
+                provider.load_access_token = _debug_load_access_token
                 if provider.client_registration_options is not None:
                     # Keep protocol-level auth limited to base identity scopes, but
                     # allow dynamically registered MCP clients to request any scope
@@ -538,6 +616,16 @@ def configure_server_for_http():
                     provider.client_registration_options.default_scopes = (
                         provider_valid_scopes
                     )
+                logger.info(
+                    "OAuth 2.1: GoogleProvider configured — base_url=%s, redirect_path=%s, "
+                    "required_scopes=%s, valid_scopes_count=%d, consent=%s",
+                    config.get_oauth_base_url(),
+                    config.redirect_path,
+                    provider_required_scopes,
+                    len(provider_valid_scopes),
+                    "external",
+                )
+
                 # CIMD clients can bypass DCR defaults and fall back to FastMCP's
                 # internal scope string, so keep it aligned with valid scopes too.
                 cimd_default_scope = " ".join(provider_valid_scopes)
