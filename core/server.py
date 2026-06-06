@@ -590,6 +590,7 @@ async def initiate_joint_auth(request: Request) -> HTMLResponse:
     """
     import os as _os
     from auth.google_auth import create_oauth_flow
+    from auth.oauth_config import get_oauth_config as _get_oauth_config
     from auth.scopes import get_current_scopes
     from auth.oauth21_session_store import get_oauth21_session_store as _get_store
 
@@ -597,7 +598,7 @@ async def initiate_joint_auth(request: Request) -> HTMLResponse:
 
     try:
         oauth_state = _os.urandom(16).hex()
-        redirect_uri = get_oauth_redirect_uri_for_current_mode()
+        redirect_uri = _get_oauth_config().get_oauth_base_url() + "/oauth2callback"
         current_scopes = get_current_scopes()
 
         flow = create_oauth_flow(
@@ -693,10 +694,12 @@ async def legacy_oauth2_callback(request: Request) -> HTMLResponse:
         if hasattr(request, "state") and hasattr(request.state, "session_id"):
             mcp_session_id = request.state.session_id
 
+        from auth.oauth_config import get_oauth_config as _get_oauth_config_cb
+
         verified_user_id, credentials = await handle_auth_callback(
             scopes=get_current_scopes(),
             authorization_response=str(request.url),
-            redirect_uri=get_oauth_redirect_uri_for_current_mode(),
+            redirect_uri=_get_oauth_config_cb().get_oauth_base_url() + "/oauth2callback",
             session_id=mcp_session_id,
         )
 
