@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import os
+from html import escape as html_escape
 from typing import List, Optional
 from importlib import metadata
 
@@ -205,6 +206,62 @@ def _ensure_legacy_callback_route() -> None:
         return
     server.custom_route("/oauth2callback", methods=["GET"])(legacy_oauth2_callback)
     _legacy_callback_registered = True
+
+
+def _seed_credentials_from_env() -> None:
+    """Seed persisted credentials from env vars at startup.
+
+    Reads WORKSPACE_MCP_JOINT_CREDENTIALS_JSON (base64 or raw JSON) and writes
+    the credentials into the active credential store.  This lets Railway keep
+    credentials alive across redeploys without a persistent volume — set the
+    env var once and the joint account is available after every restart.
+    """
+    import base64
+    import json as _json
+    from datetime import datetime
+    from google.oauth2.credentials import Credentials
+    from auth.credential_store import get_credential_store
+
+    raw = os.getenv("WORKSPACE_MCP_JOINT_CREDENTIALS_JSON", "").strip()
+    if not raw:
+        return
+
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+    except Exception:
+        decoded = raw
+
+    try:
+        creds_data = _json.loads(decoded)
+    except Exception as e:
+        logger.error("WORKSPACE_MCP_JOINT_CREDENTIALS_JSON: failed to parse JSON: %s", e)
+        return
+
+    expiry = None
+    if creds_data.get("expiry"):
+        try:
+            expiry = datetime.fromisoformat(creds_data["expiry"])
+            if expiry.tzinfo is not None:
+                expiry = expiry.replace(tzinfo=None)
+        except (ValueError, TypeError):
+            pass
+
+    credentials = Credentials(
+        token=creds_data.get("token"),
+        refresh_token=creds_data.get("refresh_token"),
+        token_uri=creds_data.get("token_uri"),
+        client_id=creds_data.get("client_id"),
+        client_secret=creds_data.get("client_secret"),
+        scopes=creds_data.get("scopes"),
+        expiry=expiry,
+    )
+
+    email = creds_data.get("email", "lizzieandpaul2019@gmail.com")
+    store = get_credential_store()
+    if store.store_credential(email, credentials):
+        logger.info("Seeded joint account credentials for %s from WORKSPACE_MCP_JOINT_CREDENTIALS_JSON", email)
+    else:
+        logger.error("Failed to seed joint account credentials from WORKSPACE_MCP_JOINT_CREDENTIALS_JSON")
 
 
 def configure_server_for_http():
@@ -577,6 +634,8 @@ def configure_server_for_http():
         set_auth_provider(None)
         _ensure_legacy_callback_route()
 
+    _seed_credentials_from_env()
+
 
 def get_auth_provider() -> Optional[GoogleProvider]:
     """Gets the global authentication provider instance."""
@@ -667,6 +726,69 @@ async def initiate_joint_auth(request: Request) -> HTMLResponse:
         )
 
 
+def _create_joint_success_response(verified_email: str, credentials) -> HTMLResponse:
+    """Success page for /auth/joint that includes the credentials JSON for Railway env var seeding."""
+    import base64
+    import json as _json
+
+    creds_data = {
+        "email": verified_email,
+        "token": credentials.token,
+        "refresh_token": credentials.refresh_token,
+        "token_uri": credentials.token_uri,
+        "client_id": credentials.client_id,
+        "client_secret": credentials.client_secret,
+        "scopes": list(credentials.scopes) if credentials.scopes else [],
+        "expiry": credentials.expiry.isoformat() if credentials.expiry else None,
+    }
+    creds_b64 = base64.b64encode(_json.dumps(creds_data).encode()).decode()
+    safe_email = html_escape(verified_email)
+
+    content = f"""<!DOCTYPE html><html>
+<head><title>Joint Account Authenticated</title>
+<style>
+  body {{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0}}
+  .card {{background:#fff;border-radius:16px;padding:40px;max-width:680px;width:90%;box-shadow:0 30px 60px rgba(0,0,0,.3)}}
+  h1 {{color:#16a34a;margin:0 0 8px}}
+  .sub {{color:#64748b;margin:0 0 28px}}
+  .step {{background:#f8fafc;border-radius:10px;padding:18px 20px;margin:12px 0;border-left:4px solid #6366f1}}
+  .step strong {{display:block;margin-bottom:4px;color:#1e293b}}
+  .step code {{font-size:13px;color:#475569;word-break:break-all}}
+  .env-name {{font-family:monospace;background:#e0e7ff;color:#3730a3;padding:2px 8px;border-radius:4px;font-size:14px}}
+  textarea {{width:100%;height:80px;font-size:11px;font-family:monospace;border:1px solid #e2e8f0;border-radius:8px;padding:10px;resize:vertical;background:#f8fafc}}
+  .copy-btn {{background:#6366f1;color:#fff;border:none;border-radius:8px;padding:10px 20px;cursor:pointer;font-size:14px;margin-top:8px;transition:background .2s}}
+  .copy-btn:hover {{background:#4f46e5}}
+  .note {{font-size:13px;color:#94a3b8;margin-top:20px;border-top:1px solid #f1f5f9;padding-top:16px}}
+</style></head>
+<body><div class="card">
+  <h1>✓ Joint Account Authenticated</h1>
+  <p class="sub">Authenticated as <strong>{safe_email}</strong></p>
+
+  <p style="color:#334155;margin:0 0 16px">To avoid re-authenticating after each Railway redeploy, save the value below as a Railway environment variable:</p>
+
+  <div class="step">
+    <strong>1. Copy this value</strong>
+    <textarea id="creds" readonly>{creds_b64}</textarea>
+    <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('creds').value).then(()=>this.textContent='Copied!')">Copy to clipboard</button>
+  </div>
+
+  <div class="step">
+    <strong>2. Add it to Railway</strong>
+    <code>Railway → your service → Variables → New variable:<br>
+    Name: <span style="font-weight:600">WORKSPACE_MCP_JOINT_CREDENTIALS_JSON</span><br>
+    Value: (paste the copied value)</code>
+  </div>
+
+  <div class="step">
+    <strong>3. Redeploy</strong>
+    <code>Railway will redeploy automatically. After that, the joint account loads from the env var on every startup — no browser re-auth needed.</code>
+  </div>
+
+  <p class="note">The value contains a refresh token so it remains valid indefinitely (until you revoke Google access). You only need to repeat this process if you explicitly revoke the app's access in your Google account settings.</p>
+</div></body></html>"""
+    return HTMLResponse(content=content)
+
+
 @server.custom_route("/auth/joint/callback", methods=["GET"])
 async def joint_auth_callback(request: Request) -> HTMLResponse:
     """Handle Google's OAuth callback for the joint account auth flow."""
@@ -709,7 +831,7 @@ async def joint_auth_callback(request: Request) -> HTMLResponse:
                 f"[/auth/joint/callback] Could not persist credentials for {verified_email}: {store_err}"
             )
         logger.info(f"[/auth/joint/callback] Successfully authenticated {verified_email}")
-        return create_success_response(verified_email)
+        return _create_joint_success_response(verified_email, credentials)
     except Exception as e:
         logger.error(f"[/auth/joint/callback] Error: {e}", exc_info=True)
         return create_server_error_response(str(e))
