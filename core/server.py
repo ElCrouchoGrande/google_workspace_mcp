@@ -562,7 +562,6 @@ def get_auth_provider() -> Optional[GoogleProvider]:
     return _auth_provider
 
 
-@server.custom_route("/", methods=["GET"])
 @server.custom_route("/health", methods=["GET"])
 async def health_check(request: Request):
     try:
@@ -577,6 +576,102 @@ async def health_check(request: Request):
             "transport": get_transport_mode(),
         }
     )
+
+
+_HOMEPAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Paul's Daily Assistant</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family: system-ui, sans-serif; max-width: 640px; margin: 4rem auto; padding: 0 1rem; color: #222;">
+  <h1>Paul's Daily Assistant</h1>
+  <p>
+    This is a personal automation tool built and used solely by Paul Crouch.
+    It connects to Paul's own Google account (Gmail, Calendar, Tasks, and
+    Drive) to power a personal daily-assistant workflow — inbox triage,
+    to-do list management, and calendar review.
+  </p>
+  <p>
+    It is not a public product or service, is not available for anyone
+    else to use, and does not collect, share, or sell any data belonging
+    to third parties.
+  </p>
+  <p><a href="/privacy">Privacy Policy</a></p>
+</body>
+</html>
+"""
+
+_PRIVACY_POLICY_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Privacy Policy — Paul's Daily Assistant</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family: system-ui, sans-serif; max-width: 640px; margin: 4rem auto; padding: 0 1rem; color: #222;">
+  <h1>Privacy Policy</h1>
+  <p><em>Last updated: 11 September 2026</em></p>
+
+  <p>
+    This application ("the app") is a personal automation tool built and
+    operated by Paul Crouch for his own individual use. It is not offered
+    as a public service, and no one other than Paul Crouch (and, for the
+    shared household inbox, Lizzie, by explicit delegated access) uses it.
+  </p>
+
+  <h2>What data the app accesses</h2>
+  <p>
+    The app connects, via Google's OAuth, to Paul's own Google accounts to
+    read and manage: Gmail messages (for inbox triage), Google Calendar
+    events, Google Tasks, and Google Drive files (for a single state
+    document used internally by the app).
+  </p>
+
+  <h2>How data is used</h2>
+  <p>
+    Data accessed through these connections is used exclusively to power
+    Paul's personal daily-assistant automation — for example, summarising
+    or organising his own emails, calendar, and tasks. Data is not sold,
+    shared with third parties, or used for advertising.
+  </p>
+
+  <h2>Data storage</h2>
+  <p>
+    The app stores minimal operational state (such as which emails have
+    already been processed) required for it to function. It does not
+    maintain a separate copy of email or file contents beyond what is
+    needed to operate.
+  </p>
+
+  <h2>Third parties</h2>
+  <p>
+    The app does not share accessed data with any third party. It
+    communicates only with Google's APIs (on Paul's own authorisation) and
+    with Anthropic's Claude, which Paul uses as the assistant interface.
+  </p>
+
+  <h2>Contact</h2>
+  <p>
+    Questions about this app or its data handling can be directed to
+    paul.crouch1@gmail.com.
+  </p>
+</body>
+</html>
+"""
+
+
+@server.custom_route("/", methods=["GET"])
+async def homepage(request: Request) -> HTMLResponse:
+    """Public homepage, required by Google's OAuth consent screen Branding page."""
+    return HTMLResponse(_HOMEPAGE_HTML)
+
+
+@server.custom_route("/privacy", methods=["GET"])
+async def privacy_policy(request: Request) -> HTMLResponse:
+    """Privacy policy, required by Google's OAuth consent screen Branding page."""
+    return HTMLResponse(_PRIVACY_POLICY_HTML)
 
 
 @server.custom_route("/auth/joint", methods=["GET"])
