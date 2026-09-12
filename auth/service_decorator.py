@@ -269,6 +269,41 @@ def _validate_dwd_domain(email: str, config) -> None:
 
 JOINT_GMAIL_ACCOUNT = "lizzieandpaul2019@gmail.com"
 
+# Primary-flow allowlist. This is defense-in-depth for when the OAuth consent
+# screen's publishing status is "In production": Google then lets ANY Google
+# account reach the authorisation flow (past its own "unverified app"
+# warning, since this app hasn't been through Google's verification), not
+# just the small set of test users allowed while "Testing". Without this
+# check, whichever email completes that flow would be able to call every
+# tool here against their own Google account, through this server. The
+# joint account is unaffected: it's loaded via _authenticate_joint_service()
+# above, bypassing this allowlist entirely.
+_DEFAULT_ALLOWED_PRIMARY_EMAILS = frozenset({"paul.crouch1@gmail.com"})
+
+
+def _get_allowed_primary_emails() -> frozenset:
+    """Configured set of emails allowed to authenticate as the primary user.
+
+    Override with a comma-separated WORKSPACE_MCP_ALLOWED_USERS env var;
+    defaults to the app owner's own address.
+    """
+    raw = os.getenv("WORKSPACE_MCP_ALLOWED_USERS")
+    if raw:
+        return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+    return _DEFAULT_ALLOWED_PRIMARY_EMAILS
+
+
+def _enforce_primary_email_allowlist(email: str, tool_name: str) -> None:
+    """Raise if `email` isn't an authorised primary user of this server."""
+    if email.lower() not in _get_allowed_primary_emails():
+        logger.warning(
+            f"[{tool_name}] Rejected authenticated identity '{email}': "
+            "not in the configured allowlist."
+        )
+        raise GoogleAuthenticationError(
+            f"Access denied: '{email}' is not an authorised user of this server."
+        )
+
 
 async def _authenticate_joint_service(
     service_name: str,
@@ -405,6 +440,7 @@ async def get_authenticated_google_service_oauth21(
             raise GoogleAuthenticationError(
                 "Authenticated user email could not be determined from access token."
             )
+        _enforce_primary_email_allowlist(resolved_email, tool_name)
 
         if auth_token_email and token_email and token_email != auth_token_email:
             raise GoogleAuthenticationError(
@@ -439,6 +475,8 @@ async def get_authenticated_google_service_oauth21(
             f"{resolved_email} via oauth2.1"
         )
         return service, resolved_email
+
+    _enforce_primary_email_allowlist(user_google_email, tool_name)
 
     store = get_oauth21_session_store()
 
