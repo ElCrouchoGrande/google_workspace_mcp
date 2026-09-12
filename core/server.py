@@ -598,7 +598,7 @@ _HOMEPAGE_HTML = """<!doctype html>
     else to use, and does not collect, share, or sell any data belonging
     to third parties.
   </p>
-  <p><a href="/privacy">Privacy Policy</a></p>
+  <p><a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a></p>
 </body>
 </html>
 """
@@ -661,6 +661,70 @@ _PRIVACY_POLICY_HTML = """<!doctype html>
 </html>
 """
 
+_TERMS_OF_SERVICE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Terms of Service — Paul's Daily Assistant</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family: system-ui, sans-serif; max-width: 640px; margin: 4rem auto; padding: 0 1rem; color: #222;">
+  <h1>Terms of Service</h1>
+  <p><em>Last updated: 12 September 2026</em></p>
+
+  <p>
+    This application ("the app") is a personal automation tool built and
+    operated by Paul Crouch for his own individual use. It is not offered
+    as a public service, and no one other than Paul Crouch (and, for the
+    shared household inbox, Lizzie, by explicit delegated access) uses it.
+    By using the app, you agree to these terms.
+  </p>
+
+  <h2>No public service</h2>
+  <p>
+    The app is not distributed, advertised, or made available to the
+    public, and is not intended for use by anyone other than Paul Crouch
+    and Lizzie. There is no sign-up process and no support offering for
+    third parties.
+  </p>
+
+  <h2>No warranty</h2>
+  <p>
+    The app is provided "as is", without warranty of any kind, express or
+    implied. Paul Crouch makes no guarantee that it will be available,
+    error-free, or fit for any particular purpose, and may modify,
+    suspend, or discontinue it at any time without notice.
+  </p>
+
+  <h2>Acceptable use</h2>
+  <p>
+    The app connects only to Paul's own Google accounts, on his own
+    authorisation, to power a personal daily-assistant workflow. It is not
+    to be used to access, process, or act on any other person's data.
+  </p>
+
+  <h2>Liability</h2>
+  <p>
+    Paul Crouch is not liable for any loss or damage arising from use of
+    the app, to the fullest extent permitted by law.
+  </p>
+
+  <h2>Changes</h2>
+  <p>
+    These terms may be updated from time to time as the app evolves. The
+    "Last updated" date above reflects the most recent revision.
+  </p>
+
+  <h2>Contact</h2>
+  <p>
+    Questions about these terms can be directed to paul.crouch1@gmail.com.
+  </p>
+
+  <p><a href="/privacy">Privacy Policy</a></p>
+</body>
+</html>
+"""
+
 
 @server.custom_route("/", methods=["GET"])
 async def homepage(request: Request) -> HTMLResponse:
@@ -672,6 +736,12 @@ async def homepage(request: Request) -> HTMLResponse:
 async def privacy_policy(request: Request) -> HTMLResponse:
     """Privacy policy, required by Google's OAuth consent screen Branding page."""
     return HTMLResponse(_PRIVACY_POLICY_HTML)
+
+
+@server.custom_route("/terms", methods=["GET"])
+async def terms_of_service(request: Request) -> HTMLResponse:
+    """Terms of service, linked from the OAuth consent screen Branding page."""
+    return HTMLResponse(_TERMS_OF_SERVICE_HTML)
 
 
 @server.custom_route("/auth/joint", methods=["GET"])
