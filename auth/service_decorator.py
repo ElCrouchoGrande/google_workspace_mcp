@@ -276,8 +276,10 @@ JOINT_GMAIL_ACCOUNT = "lizzieandpaul2019@gmail.com"
 # just the small set of test users allowed while "Testing". Without this
 # check, whichever email completes that flow would be able to call every
 # tool here against their own Google account, through this server. The
-# joint account is unaffected: it's loaded via _authenticate_joint_service()
-# above, bypassing this allowlist entirely.
+# account="joint" override (see _authenticate_joint_service and its call
+# site below) is also gated by this same allowlist - otherwise any such
+# authenticated stranger could reach the joint mailbox too, simply by
+# passing account="joint", without ever needing to pass this check.
 _DEFAULT_ALLOWED_PRIMARY_EMAILS = frozenset({"paul.crouch1@gmail.com"})
 
 
@@ -293,9 +295,15 @@ def _get_allowed_primary_emails() -> frozenset:
     return _DEFAULT_ALLOWED_PRIMARY_EMAILS
 
 
-def _enforce_primary_email_allowlist(email: str, tool_name: str) -> None:
-    """Raise if `email` isn't an authorised primary user of this server."""
-    if email.lower() not in _get_allowed_primary_emails():
+def _enforce_primary_email_allowlist(
+    email: Optional[str], tool_name: str
+) -> None:
+    """Raise if `email` isn't an authorised primary user of this server.
+
+    A falsy `email` (no verified identity available) is rejected the same
+    way as an unlisted one - fail closed rather than raise a TypeError.
+    """
+    if not email or email.lower() not in _get_allowed_primary_emails():
         logger.warning(
             f"[{tool_name}] Rejected authenticated identity '{email}': "
             "not in the configured allowlist."
@@ -871,9 +879,17 @@ def require_google_service(
                     )
 
                 # Check for joint account override — bypass session auth and load
-                # stored credentials for the joint account directly.
+                # stored credentials for the joint account directly. Gate this
+                # behind the same allowlist as the primary flow: without this,
+                # any authenticated Google account (once the OAuth consent
+                # screen is published "In production") could reach the joint
+                # mailbox simply by passing account="joint", regardless of who
+                # they actually are. `authenticated_user` is always the
+                # verified identity from AuthInfoMiddleware, never a
+                # caller-supplied value.
                 account = kwargs.get("account", "primary")
                 if account == "joint":
+                    _enforce_primary_email_allowlist(authenticated_user, tool_name)
                     service, actual_user_email = await _authenticate_joint_service(
                         service_name, service_version, tool_name, resolved_scopes
                     )
