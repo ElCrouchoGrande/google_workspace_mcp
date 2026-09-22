@@ -510,6 +510,24 @@ def configure_server_for_http():
                         "OAuth 2.1: restricting DCR client redirect URIs to allowlist: %s",
                         allowed_client_redirect_uris,
                     )
+                else:
+                    # Dynamic Client Registration is unauthenticated by spec (RFC
+                    # 7591) and, left unrestricted, lets ANY caller register a
+                    # client with an attacker-controlled redirect_uri - a
+                    # phishing/authorization-code-interception vector against
+                    # whoever completes the consent screen. Not auto-fixed here
+                    # (a wrong default could break a legitimate MCP client that
+                    # hasn't set this yet); surfaced loudly so it isn't silently
+                    # left open on a publicly reachable deployment.
+                    logger.warning(
+                        "OAuth 2.1: WORKSPACE_MCP_ALLOWED_CLIENT_REDIRECT_URIS is "
+                        "not set - Dynamic Client Registration will accept ANY "
+                        "client-supplied redirect_uri. On a publicly reachable "
+                        "server this is a phishing/authorization-code-"
+                        "interception risk. Set it to your legitimate MCP "
+                        "client redirect URI(s), comma-separated, before "
+                        "publishing this app's OAuth consent screen."
+                    )
                 provider = GoogleProvider(
                     client_id=config.client_id,
                     client_secret=config.client_secret,
