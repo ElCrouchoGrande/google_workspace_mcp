@@ -76,6 +76,8 @@ Defined in `auth/scopes.py`. Scope groups (`"gmail_read"`, `"gmail_modify"`, etc
 | `WORKSPACE_MCP_BASE_URI` | Base URL (e.g. `https://your-app.up.railway.app`) |
 | `WORKSPACE_MCP_PORT` | Port (Railway sets `PORT` automatically) |
 | `USER_GOOGLE_EMAIL` | Default email for single-user / OAuth 2.0 mode |
+| `WORKSPACE_MCP_ALLOWED_CLIENT_REDIRECT_URIS` | Comma-separated allowlist of redirect URIs for OAuth 2.1 Dynamic Client Registration. **Leave unset and any caller can register a DCR client with an attacker-controlled redirect_uri** — a phishing/authorization-code-interception vector on a publicly reachable deployment. Set this before publishing the OAuth consent screen; see the warning `core/server.py` logs at startup when it's missing. |
+| `WORKSPACE_MCP_ALLOWED_USERS` | Comma-separated email allowlist restricting who can authenticate as the "primary" MCP user (default: the app owner's own email hardcoded in `auth/service_decorator.py`). Also gates the `account="joint"` override. |
 
 ## Testing
 
