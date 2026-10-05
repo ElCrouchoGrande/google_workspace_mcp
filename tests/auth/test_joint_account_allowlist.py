@@ -9,13 +9,18 @@ which is anyone, once the OAuth consent screen is published "In production"
 - could reach the joint mailbox simply by passing account="joint".
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 import auth.service_decorator as service_decorator
 
 
 class _FakeService:
-    """Minimal stand-in with the .close() the wrapper calls on cleanup."""
+    """Minimal stand-in for the wrapper's cleanup (close / connection recycling)."""
+
+    def __init__(self) -> None:
+        self._http = SimpleNamespace(http=object())
 
     def close(self) -> None:
         pass
@@ -35,7 +40,9 @@ def _patch_common_decorator_state(monkeypatch, authenticated_user):
 @pytest.mark.asyncio
 async def test_joint_override_rejects_unauthorised_authenticated_user(monkeypatch):
     """An authenticated stranger must not reach the joint account."""
-    _patch_common_decorator_state(monkeypatch, authenticated_user="stranger@example.com")
+    _patch_common_decorator_state(
+        monkeypatch, authenticated_user="stranger@example.com"
+    )
 
     async def fake_authenticate_joint_service(*args, **kwargs):
         raise AssertionError(
@@ -59,7 +66,9 @@ async def test_joint_override_rejects_unauthorised_authenticated_user(monkeypatc
 @pytest.mark.asyncio
 async def test_joint_override_allows_authorised_owner(monkeypatch):
     """The app owner's own authenticated session can still use account="joint"."""
-    _patch_common_decorator_state(monkeypatch, authenticated_user="paul.crouch1@gmail.com")
+    _patch_common_decorator_state(
+        monkeypatch, authenticated_user="paul.crouch1@gmail.com"
+    )
 
     calls = []
     fake_service = _FakeService()
