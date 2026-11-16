@@ -174,7 +174,7 @@ constraint-dependencies = [
     "python-multipart>=0.0.32", # GHSA-5rvq-..., -v9pg-..., -6jv3-..., -vffw-...
     "pydantic-settings>=2.14.2", # GHSA-4xgf-cpjx-pc3j
     "oauthlib>=4.0.0",          # GHSA-hj66-6f7g-4r5v: revocation endpoint JSONP injection
-    "opentelemetry-api>=1.45.1", # bumped in upstream b4b1748
+    "opentelemetry-api>=1.45.2", # bumped in upstream 2ee41d0
     "authlib>=1.9.1",           # added in upstream d12bc3f (Dependabot)
-    "dnspython>=2.9.0; python_version >= '3.11'", # added in upstream d12bc3f (Dependabot)
+    "dnspython>=2.9.2; python_version >= '3.11'", # floor raised in upstream 2ee41d0
 ]
